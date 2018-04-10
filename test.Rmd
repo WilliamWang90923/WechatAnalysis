@@ -1,0 +1,644 @@
+---
+output: 
+    html_document:
+        df_print: paged
+        toc: true
+        toc_depth: 4
+        toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+## 微信聊天记录报告  
+本报告于`r Sys.time()`时生成。
+
+### 1. 分析环境配置  
+#### 1.1 加载分析使用的包
+
+```{r package installation, message=FALSE, echo=TRUE}
+libs <- c("plotly", "data.table", "lubridate", "dplyr", "stringr", "tidyr", "jiebaR", "wordcloud2", "webshot", "htmlwidgets")
+for (i in libs){
+  if( !is.element(i, .packages(all.available = TRUE)) ) {
+    install.packages(i)
+  }
+  library(i,character.only = TRUE)
+}
+
+if(!file.exists("output")) {
+    dir.create("output")
+}
+sessionInfo()
+```
+#### 1.2 导入聊天记录并进行数据整形
+```{r data transvert, max.print = 50}
+
+fileUrl <- "d:/WechatLogWithGF1026.csv"
+dt <- fread(file = fileUrl)
+# Decoding `
+# CreateTime
+dt$CreateTime <- as.POSIXct(x = as.numeric(dt$CreateTime), 
+                       origin = "1970-01-01 00:00:00")
+# `Des`
+dt[dt$Des == "1"]$Des <- "接收"
+dt[dt$Des == "0"]$Des <- "发送"
+# `Type`
+# 10000 = system message
+# 1 = text message
+# 3 = img message `type` 
+# 43 = light video message `type`
+# 49 = app share message `type`
+# 47 = emoji message `type`
+# 50 = voice video message `type`
+
+dt[dt$Type == "10000"]$Type <- "系统"
+dt[dt$Type == "1"]$Type <- "文字"
+dt[dt$Type == "3"]$Type <- "图片"
+dt[dt$Type == "43"]$Type <- "小视频"
+dt[dt$Type == "47"]$Type <- "表情"
+dt[dt$Type == "49"]$Type <- "分享"
+dt[dt$Type == "50"]$Type <- "语音视频"
+
+# 0 = send, 1 = received
+dtForShow <- dt
+dtForShow$Message <- "（略）"
+showLine <- 10
+
+```
+最早的`r showLine`条信息：  
+`r head(dtForShow, n = showLine)`  
+最近的`r showLine`条信息：  
+`r tail(dtForShow, n = showLine)`  
+
+### 2. 消息总览  
+#### 2.1 不同类型的消息收发总览
+
+```{r summary}
+diffMsgTypedt <- dt %>% 
+    group_by(Des, Type) %>% 
+    summarise(Count = n()) %>%
+    group_by(Type) %>% 
+    mutate(CountTotal= sum(Count)) %>%
+    mutate(Percentage = 100*Count/CountTotal) %>%
+    group_by(Des) %>% 
+    arrange(desc(Count), .by_group = TRUE) %>%
+    mutate(Annotation = ifelse(Des == "接收",
+                               (100-Percentage)+Percentage/2, 
+                               Percentage/2 ))
+
+
+# Order x-axis
+diffMsgTypedt$Type <- factor(diffMsgTypedt$Type,
+                              levels = unique(diffMsgTypedt$Type)[order(diffMsgTypedt$Count)])
+
+p1 <- plot_ly(data = diffMsgTypedt,
+        x = ~Percentage,
+        y = ~Type,
+        color = ~Des,
+        orientation = 'h',
+        type = "bar",
+        hoverinfo = "text",
+        text = paste0("占", diffMsgTypedt$Type, "消息</br></br>总",
+                     diffMsgTypedt$CountTotal, "条的",
+                     round(diffMsgTypedt$Percentage), "%",
+                     "</br>"),
+        hoverlabel = list(font = list(color = 'rgb(248, 248, 255)'))) %>%
+    add_annotations(xref = 'x', yref = 'y',
+                  x = ~Annotation, y = ~Type,
+                  text = diffMsgTypedt$Count,
+                  font = list(color = 'rgb(248, 248, 255)'),
+                  showarrow = FALSE) %>%
+    layout(barmode = "stack",
+           title = "收发消息总览",
+           yaxis = list(title = "",
+                        showgrid = FALSE,
+                        showline = FALSE,
+                        zeroline = FALSE),
+           xaxis = list(title = "",
+                        showgrid = FALSE,
+                        showline = FALSE,
+                        showticklabels = FALSE,
+                        zeroline = FALSE),
+           legend = list(orientation = 'h'),
+           margin = list(t = 30, b = 50)
+           )
+p1
+```
+
+#### 2.2 消息条数热图  
+```{r message_per_day_heatmap}
+msgPerDay <- dt %>%
+    select(CreateTime, Type) %>%
+    mutate(Year = year(CreateTime), Month = month(CreateTime), Day = day(CreateTime)) %>%
+    group_by(Year, Month, Day) %>%
+    summarise(Count = n())
+
+# Data convert
+data <- spread(msgPerDay, key = Day, value = Count)
+data <- as.data.frame(data)
+data[is.na(data)] <- 0
+rownames(data) <- paste0(data$Year, "年", data$Month, "月")
+data <- as.matrix(data[,3:ncol(data)])
+#data <- data[,3:ncol(data)]
+
+# Color scale
+vals <- unique(scales::rescale(c(data)))
+o <- order(vals, decreasing = FALSE)
+cols <- scales::col_numeric("Blues", domain = NULL)(vals)
+colz <- setNames(data.frame(vals[o], cols[o]), NULL)
+colz[, 2] <- as.character(colz[,2])
+colz[colz[,1] == 0, 2] <- "#FFFFFF"
+colz[, 2] <- as.factor(colz[,2])
+
+# Hover text
+data.text <- character(0)
+for (i in 1:nrow(data)) {
+    tmp <- sapply(data[i, ], function(x) paste0("日</br></br>收发消息:", x))
+    tmp <- paste0(rownames(data)[i], colnames(data), tmp)
+    data.text <- append(data.text, tmp)
+}
+data.text <- matrix(data.text, ncol = 31, byrow = TRUE)
+
+# Weekend
+data.week <- character(0)
+for (i in 1:nrow(data)) {
+    tmp <- paste0(rownames(data)[i], colnames(data))
+    data.week <- append(data.week, tmp)
+}
+data.week <- str_replace_all(string = data.week, 
+                                pattern = "年|月", 
+                                replacement = "-")
+data.week <- as.Date(data.week)
+data.week <- weekdays(data.week)
+data.week <- matrix(data.week, ncol = 31, byrow = TRUE)
+
+# Annotation
+position.zero <- which(data == 0, TRUE)
+position.sat <- which(data.week == c("星期六"), TRUE)
+position.sun <- which(data.week == c("星期日"), TRUE)
+
+# Plot
+plot_ly(x = colnames(data),
+        y = rownames(data),
+        z = data,
+        height = 40*nrow(data),
+        showlegend = FALSE,
+        colorscale = colz,
+        type = "heatmap",
+        hoverinfo = "text",
+        text = data.text) %>%
+    layout(title = "消息数热图",
+           xaxis = list(title = "", showgrid = FALSE),
+           yaxis = list(showgrid = FALSE),
+           margin = list(t = 30, l = 80)) %>%
+    add_annotations(
+        x = position.sat[, 2],
+        y = position.sat[, 1]-1.25,
+        text = "◢",
+        font = list(color = "#08306B", size = 8),
+        xanchor = 'left',
+        showarrow = F
+    ) %>%
+    add_annotations(
+        x = position.sun[, 2],
+        y = position.sun[, 1]-1.25,
+        text = "◢",
+        font = list(color = "#08306B", size = 8),
+        xanchor = 'left',
+        showarrow = F
+    )
+```
+◢ 周末
+
+#### 2.3 消息发送频率（总体）  
+
+```{r message_per_day}
+# Time span
+span <- "15 minutes"
+msgPerHour <- dt %>%
+    select(CreateTime, Type, Des) %>%
+    mutate(Time = format(floor_date(CreateTime, span), "%H:%M")) %>%
+    group_by(Des, Time) %>%
+    summarise(Count = n())
+       
+
+p2 <- plot_ly(data = msgPerHour,
+        x = ~Time,
+        y = ~Count,
+        color = ~Des,
+        type = "scatter",
+        mode = "lines+markers",
+        hoverinfo = "text",
+        text = paste0("时间：", msgPerHour$Time, "</br></br>条数：",
+                     msgPerHour$Count),
+        hoverlabel = list(font = list(color = 'rgb(248, 248, 255)'))) %>%
+    layout(title = "每15分钟消息发送情况",
+           yaxis = list(title = "条",
+                        showgrid = FALSE,
+                        showline = FALSE),
+           xaxis = list(title = "",
+                        showgrid = FALSE),
+           legend = list(x = 0.4, y = 0.9, orientation = 'h'),
+           margin = list(t = 30, b = 50))
+p2
+```
+
+#### 2.4 每月消息分布  
+
+```{r message_per_day_by_month}
+msgByMonth <- dt %>%
+    select(CreateTime, Type, Des) %>%
+    mutate(Month = format(CreateTime, "%m"), Year = format(CreateTime, "%y")) %>%
+    group_by(Des, Year, Month) %>%
+    summarise(Count = n())
+
+p3 <- plot_ly(data = msgByMonth,
+        x = ~Month,
+        y = ~Count,
+        color = ~Des,
+        type = "bar",
+        hoverinfo = "text",
+        text = paste0(msgByMonth$Count, "条"),
+        hoverlabel = list(font = list(color = 'rgb(248, 248, 255)'))) %>%
+    layout(title = "每月消息发送情况",
+           yaxis = list(title = "条",
+                        showgrid = FALSE,
+                        showline = FALSE),
+           xaxis = list(title = "月份",
+                        showgrid = FALSE),
+           legend = list(orientation = 'h'),
+           margin = list(t = 30, b = 50))
+p3
+```
+
+#### 2.5 消息类型分布  
+```{r message_type_distrobution}
+msgType <- dt %>%
+    select(Type, Des) %>%
+    group_by(Des, Type) %>%
+    summarise(Count = n()) %>%
+    mutate(Freqency = Count / sum(Count))
+
+p4 <- plot_ly(labels =~ Type,
+        values =~ Count,
+        insidetextfont = list(color = '#FFFFFF'), 
+        textinfo = 'label+percent',
+        pull = 0.05,
+        showlegend = FALSE) %>%
+    add_pie(data = msgType[msgType$Des == "发送", ],
+            name = "发送",
+            domain = list(x = c(0, 0.45))) %>%
+    add_pie(data = msgType[msgType$Des == "接收", ],
+            name = "接收",
+            domain = list(x = c(0.55, 1))) %>%
+    layout(title = "消息类型分布",
+           margin = list(t = 30, b = 100))
+p4
+```
+
+### 3. 文字消息分析  
+#### 3.1 文字消息长度分布  
+
+```{r text_message_length, results="hold", max.print = 50}
+textMsg <- dt %>%
+    select(Des, Message, Type) %>%
+    filter(Type == "文字") %>%
+    mutate(Length = nchar(Message))
+
+plot_ly(data = textMsg, 
+        x =~ Length, 
+        color =~ Des, 
+        type = "histogram", 
+        alpha = 0.6) %>%
+    layout(title = "文字消息长度分布",
+           xaxis = list(title = "单条文字消息字数",
+                        range = c(0, quantile(textMsg$Length, 0.99))),
+           yaxis = list(title = "条"),
+           barmode = "overlay",
+           legend = list(orientation = "h"),
+           margin = list(t = 30, b = 100))
+
+max.message <- function(Dest) {
+    dt <- textMsg %>%
+        filter(Des == Dest) %>%
+        arrange(desc(Length)) %>%
+        mutate(Content = ifelse(Length > 45,
+                                paste0(substr(Message, 0, 45), "..."),
+                                Message)) %>%
+        select(Length, Content)
+    dt
+}
+sendTopLenghtMsg <- max.message("发送")
+receivedTopLenghtMsg <- max.message("接收")
+
+max.default.emoji <- function(Des) {
+    data <- textMsg[textMsg$Des == Des, ]
+    Emoji <- str_extract_all(string = data$Message, pattern = "\\[.+?\\]")
+    Emoji <- unlist(Emoji)
+    Emoji <- as.data.table(table(Emoji))
+    Emoji[order(-N)] 
+}
+
+sendEmoji <- max.default.emoji("发送")
+receivedEmoji <- max.default.emoji("接收")
+```
+**接收**的最长的一条消息有`r receivedTopLenghtMsg[1,1]`字  
+`r receivedTopLenghtMsg`  
+**发送**的最长的一条消息有`r sendTopLenghtMsg[1,1]`字  
+`r sendTopLenghtMsg`  
+
+#### 3.2 关键词分析
+```{r key_word}
+keyWordCal <- function(D, n) {
+    wk <- worker()
+    # Split words
+    splitWord <- wk <= textMsg[textMsg$Des == D, ]$Message
+    keys <- worker("keywords", stop_word = "dic/stop_word.txt",topn = n)
+    # Extract key words
+    tmp <- vector_keywords(splitWord,keys)
+    # Convert to data.frame
+    tmpdt <- cbind(tmp, as.numeric(names(tmp)))
+    # Edit row and column name
+    row.names(tmpdt) <- 1:nrow(tmpdt)
+    colnames(tmpdt) <- c("词汇", "TF-IDF")
+    tmpdt <- as.data.frame(tmpdt)
+    tmpdt[,2] <- as.numeric(as.character(tmpdt[,2]))
+    tmpdt[,1] <- as.character(tmpdt[,1])
+    tmpdt
+}
+
+
+sendKeyWord <- keyWordCal("发送", 300)
+sendKeyWord$`TF-IDF` <- sqrt(sendKeyWord$`TF-IDF`)^1.3
+receivedKeyWord <- keyWordCal("接收", 300)
+receivedKeyWord$`TF-IDF` <- sqrt(receivedKeyWord$`TF-IDF`)^1.3
+
+#webshot::install_phantomjs()
+receivedPNG <- "receivedWordCloud.png"
+sendPNG <- "sendWordCloud.png"
+
+receivedWordCloud <- wordcloud2(receivedKeyWord, 
+           size = 1.5, 
+           color = "random-light", 
+           fontFamily = "微软雅黑", 
+           minRotation = 0, 
+           maxRotation = 0,
+           shape = "pentagon")
+
+saveWidget(receivedWordCloud,"receivedWordCloud.html",selfcontained = F)
+
+sendWordCloud <- wordcloud2(sendKeyWord, 
+           size = 1.5, 
+           color = "random-light", 
+           fontFamily = "微软雅黑",
+           minRotation = 0, 
+           maxRotation = 0,
+           shape = "pentagon")
+
+saveWidget(sendWordCloud,"sendWordCloud.html",selfcontained = F)
+```
+**接收**的消息中的关键词  
+```{r receivedPNG, out.width='100%'}
+webshot("receivedWordCloud.html", receivedPNG, vwidth = 1300, vheight = 1000, delay = 15)
+```
+**发送**的消息中的关键词  
+```{r sendPNG, out.width='100%'}
+webshot("sendWordCloud.html", sendPNG, vwidth = 1300, vheight = 1000, delay = 15)
+```
+
+#### 3.3 系统默认表情
+```{r default_emoji}
+top <- min(nrow(sendEmoji), nrow(receivedEmoji))
+
+default.emoji.plot <- function(data, top, name) {
+    if(nrow(data) > 0) {
+        dataSub <- data[1:top, ]
+        # Order x-axis
+        dataSub$Emoji <- factor(dataSub$Emoji, 
+                                levels = dataSub$Emoji[order(dataSub$N, 
+                                                             decreasing = TRUE)])
+        p <- plot_ly(data = dataSub,
+                     x = ~Emoji,
+                     y = ~N,
+                     type = "bar",
+                     name = name,
+                     hoverinfo = "y+text",
+                     text = paste("占", name, "总默认表情的",
+                                  round(dataSub$N/sum(dataSub$N), 3) * 100, "%"),
+                     hoverlabel = list(font = list(color = 'rgb(248, 248, 255)'))
+        )
+    } else {
+        p <- "没有数据"    
+    }
+}
+
+p1 <- default.emoji.plot(sendEmoji, top, "发送")
+p2 <- default.emoji.plot(receivedEmoji, top, "接收")
+
+subplot(p2, p1) %>% 
+    layout(title = paste0("使用频度最高的",top,"个自带表情"),
+           margin = list(t = 30),
+           legend = list(orientation = "h"),
+           barmode = 'group'
+    )
+```
+
+### 4. 自定义表情分析
+#### 4.1 接收
+```{r received_emoji}
+top <- 5
+
+stickerDt <- dt %>%
+    filter(Type == "表情", Des == "接收")
+
+emojiurl <- str_extract(string = stickerDt$Message, pattern = 'cdnurl = ""(.+?)""')
+emojiurl <- str_replace_all(string = emojiurl, pattern = 'cdnurl = \"\"', replacement = "")
+emojiurl <- str_replace_all(string = emojiurl, pattern = '\"\"', replacement = "")
+
+stickerDtSm1 <- data.table(table(emojiurl)) %>% arrange(desc(N))
+
+if(nrow(stickerDtSm1) > top) {
+    topEmoji <- top
+} else {
+    topEmoji <- nrow(stickerDtSm1)
+}
+
+if(!dir.exists("emoji")){
+    dir.create("emoji")
+}
+
+```
+
+共接收自定义表情信息`r nrow(stickerDt)`条，其中非重复的表情一共有`r nrow(stickerDtSm1)`个，接收的最多的一个表情`r stickerDtSm1[1,2]`次。  
+表情包发送数目的前`r topEmoji`位如下：  
+
+```{r received_emoji_show, results='asis'}
+fileName <- paste0("emoji/",1:topEmoji,".gif")
+
+for (i in 1:topEmoji) {
+    # 下面这句注释是为了放置测试时候重复执行下载操作，
+    # 如果想跑不同结果时候请取消注释，否则表情包不会下载更新结果
+    #download.file(as.character(stickerDtSm1[i,1]), fileName[i], mode = 'wb')
+    cat("**第", i, "位: ", stickerDtSm1[i,2], "次**")
+    cat("![](",fileName[i],")\n\n")
+}
+
+```
+
+```{r send_emoji}
+top <- 5
+stickerDt <- dt %>%
+    filter(Type == "表情", Des == "发送")
+
+emojimd5 <- str_extract(string = stickerDt$Message, pattern = 'md5=""(.+?)""')
+emojimd5 <- str_replace_all(string = emojimd5, pattern = 'md5=\"\"', replacement = "")
+emojimd5 <- str_replace_all(string = emojimd5, pattern = '\"\"', replacement = "")
+
+stickerDtSm2 <- data.table(table(emojimd5)) %>% arrange(desc(N))
+
+if(nrow(stickerDtSm2) > top) {
+    topEmoji <- top
+} else {
+    topEmoji <- nrow(stickerDtSm2)
+}
+```
+#### 4.2 发送
+共发送自定义表情信息`r nrow(stickerDt)`条，其中非重复的表情一共有`r nrow(stickerDtSm2)`个，发送的最多的一个表情`r stickerDtSm2[1,2]`次。  
+
+#### 4.3 自定义表情喜好
+```{r prefer_emoji}
+p4 <- plot_ly(data = stickerDtSm1,
+        x = ~N,
+        name = "接收",
+        type = "histogram",
+        alpha = 0.7,
+        autobinx = FALSE,
+        xbins = list(start = min(stickerDtSm1$N), 
+                     end = max(stickerDtSm1$N),
+                     size = 2)) %>%
+    add_trace(data = stickerDtSm2,
+              x = ~N,
+              name = "发送") %>%
+    layout(title = "自定义表喜好分布",
+           xaxis = list(title = "单个表情发送次数"),
+           yaxis = list(title = "表情个数"),
+           barmode = "overlay",
+           margin = list(t = 30),
+           legend = list(orientation = "h"))
+
+axis_range <- ifelse(nrow(stickerDtSm1) < nrow(stickerDtSm2),
+                     quantile(stickerDtSm1$N, 0.9),
+                     quantile(stickerDtSm2$N, 0.9)
+                     )
+
+p5 <- plot_ly(data = stickerDtSm1,
+        x = ~(1:nrow(stickerDtSm1)),
+        y = ~N,
+        name = "接收",
+        type = "bar",
+        alpha = 0.6) %>%
+    add_trace(data = stickerDtSm2,
+              x = ~(1:nrow(stickerDtSm2)),
+              y = ~N,
+              name = "发送") %>%
+    layout(title = "单表情发送次数",
+           xaxis = list(visible = FALSE,
+                        range = c(0, axis_range)),
+           yaxis = list(title = "发送次数"),
+           barmode = "overlay",
+           margin = list(t = 30),
+           legend = list(orientation = "h"))
+p4
+p5
+```
+
+### 5. 语音视频通话分析  
+
+#### 5.1 每月通话时长
+```{r video_time}
+videoMsg <- dt %>%
+    filter(Type == "语音视频")
+
+duration <- str_match_all(string = videoMsg$Message,
+                          pattern = "<duration>(.+?)</duration>")
+
+Second <- character(length(duration))
+Duration <- character(length(duration))
+
+for (i in 1:length(duration)) {
+    if(is.na(duration[[i]][2])) {
+        Second[i] <- 0
+        Duration[i] <- "0:00"
+    } else {
+        Second[i] <- as.numeric(duration[[i]][2])
+        minute <- floor(as.numeric(duration[[i]][2]) / 60)
+        second <- as.numeric(duration[[i]][2]) %% 60
+        Duration[i] <- sprintf("%01d:%02d", minute, second)
+    }
+}
+
+videoMsgSm <- videoMsg %>%
+    select(CreateTime) %>%
+    mutate(Year = format(CreateTime, "%y"), 
+           Month = format(CreateTime, "%m"),
+           Duration = Duration, 
+           Second = as.numeric(Second)) %>%
+    filter(Second > 0)
+
+plot_ly(data = videoMsgSm,
+        x = ~Month,
+        y = ~floor(Second/60),
+        type = "box",
+        boxpoints = "all",
+        jitter = 0.5,
+        pointpos = 0,
+        color = ~Month,
+        showlegend = FALSE,
+        hoverinfo = "y",
+        boxmean = TRUE) %>%
+    add_trace(x = "全部",
+              y = ~floor(Second/60),
+              color = "") %>%
+    layout(title = "每月单次语音视频消息通话时长",
+           xaxis = list(title = "月份"),
+           yaxis = list(title = "分钟"),
+           margin = list(t = 30))
+
+videoMsgSmPerMonth <- videoMsgSm %>%
+    group_by(Year, Month) %>%
+    summarise(Count = n(), Last = floor(sum(Second)/60), Span = round(Last/Count))
+
+colnames(videoMsgSmPerMonth) <- c("年", "月", "通话次数", "通话总时长（分钟）", "平均每次通话时长（分钟）")
+videoMsgSmPerMonth
+```
+#### 5.2 通话时间段
+```{r calling_time}
+videoMsgSm$EndTime <- videoMsgSm$CreateTime + ms(videoMsgSm$Duration)
+
+videoMsgSm$Hour <- hour(videoMsgSm$CreateTime)
+videoMsgSm$Minute <- minute(videoMsgSm$CreateTime)
+
+videoMsgSm$EndHour <- hour(videoMsgSm$EndTime)
+videoMsgSm$EndMinute <- minute(videoMsgSm$EndTime)
+
+plot_ly(data = videoMsgSm,
+        x = ~as.numeric(paste0(Hour, ".", round(Minute/60*100))),
+        y = ~as.numeric(paste0(EndHour, ".", round(EndMinute/60*100))),
+        alpha = 0.5,
+        type = "scatter",
+        mode = 'markers',
+        marker = list(size = ~log(Second)),
+        hoverinfo = "text",
+        text = paste0("接通时间：",
+                      paste0(videoMsgSm$Hour, "时", videoMsgSm$Minute),
+                      "分</br></br>挂断时间：",
+                      paste0(videoMsgSm$EndHour, "时", videoMsgSm$EndMinute),
+                      "分</br></br>通话时长：",
+                      videoMsgSm$Duration)
+        ) %>%
+    layout(title = "通话时间分布图",
+           xaxis = list(title = "接通时间", range = c(-1, 24.9)),
+           yaxis = list(title = "挂断时间", range = c(-1, 24.9)),
+           margin = list(t = 30))
+```
